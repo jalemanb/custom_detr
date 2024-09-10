@@ -108,6 +108,8 @@ class PersonDataset(Dataset):
             transforms.GaussianBlur(kernel_size=(5, 5), sigma=(0.1, 2.0)),  # Apply Gaussian blur
             RandomBlackPatches(),
             transforms.ToTensor(),
+            transforms.ConvertImageDtype(torch.float),
+            transforms.Normalize(mean=[0., 0., 0.],  std=[1, 1, 1])
         ])
 
 
@@ -127,6 +129,7 @@ class PersonDataset(Dataset):
             with open(groundtruth_file, 'r') as f:
                 target_boxes = [list(map(int, line.strip().split(','))) for line in f]
 
+
             # Ensure the image files and target_boxes are aligned
             assert len(image_files) == len(target_boxes), "Mismatch between images and target boxes"
 
@@ -139,13 +142,17 @@ class PersonDataset(Dataset):
                 if os.path.exists(det_file):
                     with open(det_file, 'r') as f:
                         bounding_boxes = [list(map(int, line.strip().split(','))) for line in f]
-                        bounding_boxes = [[int(x + w / 2), int(y + h / 2), w, h] for x, y, w, h in bounding_boxes]
                 else:
                     bounding_boxes = []
                 
+                # inserting the target object into the distractor objects
+                # The first bounding box now represents target object and the rest the distractor objs
+                bounding_boxes.insert(0, target_boxes[idx])
+                # Converting from x_top_left, y_top_left, w_h, to x_center, y_center, w, h
+                bounding_boxes = [[int(x + w / 2), int(y + h / 2), w, h] for x, y, w, h in bounding_boxes]
+
                 data.append({
                     'img_path': img_path,
-                    'target_bounding_box': target_boxes[idx],
                     'bounding_boxes': bounding_boxes,
                     'templates_path': gallery_dir
                 })
@@ -159,23 +166,21 @@ class PersonDataset(Dataset):
 
         sample = self.data[idx]
 
+        # Getting the bounding boxes of the distractor objects
         bounding_boxes_list = sample['bounding_boxes'].copy()
-        target_bounding_box_list = sample['target_bounding_box'].copy()
-
-        # print(sample['img_path'])
 
         # Load the image
         image = Image.open(sample['img_path']).convert('RGB')
 
+        # Get the original Img Size
         orig_w, orig_h = image.size
-        img_new_size = self.img_transform_size
 
         # Apply transforms to the image if provided
         if self.img_transform:
             image = self.img_transform(image)
         
+        # Select a random number of templates from 1 up to the maximum allowed
         num_templates = random.randint(1, self.max_num_templates)
-
         template_files = os.listdir(sample['templates_path'])
 
         # Load templates from the gallery directory
@@ -185,25 +190,20 @@ class PersonDataset(Dataset):
         # Load templates and apply transforms
         templates_imgs = [self.template_transform(Image.open(tpl).convert('RGB')) if self.template_transform else Image.open(tpl).convert('RGB') for tpl in template_paths]
 
+        # Create a Tensor with multiple template imgs
         templates_imgs = torch.stack(templates_imgs)
 
+        # Unit scale the bounding boxes (distractors + target)
         bounding_boxes_list_unit = [unitscale_bbox(bbox, (orig_h, orig_w)) for bbox in bounding_boxes_list]
 
-        x_min, y_min, w, h = target_bounding_box_list
-
-        target_bounding_box_list_unit = unitscale_bbox([x_min, y_min, w, h], (orig_h, orig_w))
-
         # Convert bounding boxes to tensors
-        target_bounding_box_tensor = torch.tensor(target_bounding_box_list_unit, dtype=torch.float32)
         bounding_boxes_tensor = torch.tensor(bounding_boxes_list_unit, dtype=torch.float32)
 
+        # Initialize a tensor of zeros with shape [max_boxes, 4]
         num_boxes = bounding_boxes_tensor.shape[0]
+        padded_boxes = torch.zeros((self.max_detections, 4), dtype=bounding_boxes_tensor.dtype)
 
         num_templates = templates_imgs.shape[0]
-    
-        # Initialize a tensor of zeros with shape [max_boxes, 4]
-        padded_boxes = torch.zeros((self.max_detections, 4), dtype=target_bounding_box_tensor.dtype)
-
         padded_templates = torch.zeros((self.max_num_templates, templates_imgs.shape[1], templates_imgs.shape[2], templates_imgs.shape[3]))
 
         if not(bounding_boxes_tensor.shape == torch.Size([0])):
@@ -212,11 +212,9 @@ class PersonDataset(Dataset):
 
         padded_templates[:num_templates, :, :, :] = templates_imgs
 
-
         # Return a dictionary with the data
         return {
             'img': image,
-            'target_bounding_box': target_bounding_box_tensor,
             'bounding_boxes': padded_boxes,
             'templates': padded_templates,
             'num_boxes': num_boxes,
