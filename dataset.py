@@ -98,6 +98,9 @@ class PersonDataset(Dataset):
         self.img_transform = transforms.Compose([
             transforms.Resize(img_transform_size),
             transforms.ToTensor(),
+            transforms.ConvertImageDtype(torch.float),
+            transforms.Normalize(mean=[0., 0., 0.],  std=[1, 1, 1])
+
         ])
 
         self.template_transform = transforms.Compose([
@@ -136,9 +139,10 @@ class PersonDataset(Dataset):
                 if os.path.exists(det_file):
                     with open(det_file, 'r') as f:
                         bounding_boxes = [list(map(int, line.strip().split(','))) for line in f]
+                        bounding_boxes = [[int(x + w / 2), int(y + h / 2), w, h] for x, y, w, h in bounding_boxes]
                 else:
                     bounding_boxes = []
-
+                
                 data.append({
                     'img_path': img_path,
                     'target_bounding_box': target_boxes[idx],
@@ -155,7 +159,10 @@ class PersonDataset(Dataset):
 
         sample = self.data[idx]
 
-        print(sample['img_path'])
+        bounding_boxes_list = sample['bounding_boxes'].copy()
+        target_bounding_box_list = sample['target_bounding_box'].copy()
+
+        # print(sample['img_path'])
 
         # Load the image
         image = Image.open(sample['img_path']).convert('RGB')
@@ -180,28 +187,28 @@ class PersonDataset(Dataset):
 
         templates_imgs = torch.stack(templates_imgs)
 
-        sample['bounding_boxes'] = [unitscale_bbox(bbox, (orig_h, orig_w)) for bbox in sample['bounding_boxes']]
+        bounding_boxes_list_unit = [unitscale_bbox(bbox, (orig_h, orig_w)) for bbox in bounding_boxes_list]
 
-        x_min, y_min, w, h = sample['target_bounding_box']
+        x_min, y_min, w, h = target_bounding_box_list
 
-        sample['target_bounding_box'] = unitscale_bbox([x_min, y_min, w, h], (orig_h, orig_w))
+        target_bounding_box_list_unit = unitscale_bbox([x_min, y_min, w, h], (orig_h, orig_w))
 
         # Convert bounding boxes to tensors
-        target_bounding_box = torch.tensor(sample['target_bounding_box'], dtype=torch.float32)
-        bounding_boxes = torch.tensor(sample['bounding_boxes'], dtype=torch.float32)
+        target_bounding_box_tensor = torch.tensor(target_bounding_box_list_unit, dtype=torch.float32)
+        bounding_boxes_tensor = torch.tensor(bounding_boxes_list_unit, dtype=torch.float32)
 
-        num_boxes = bounding_boxes.shape[0]
+        num_boxes = bounding_boxes_tensor.shape[0]
 
         num_templates = templates_imgs.shape[0]
     
         # Initialize a tensor of zeros with shape [max_boxes, 4]
-        padded_boxes = torch.zeros((self.max_detections, 4), dtype=target_bounding_box.dtype)
+        padded_boxes = torch.zeros((self.max_detections, 4), dtype=target_bounding_box_tensor.dtype)
 
         padded_templates = torch.zeros((self.max_num_templates, templates_imgs.shape[1], templates_imgs.shape[2], templates_imgs.shape[3]))
 
-        if not(bounding_boxes.shape == torch.Size([0])):
+        if not(bounding_boxes_tensor.shape == torch.Size([0])):
             # Fill in the existing bounding boxes
-            padded_boxes[:num_boxes] = bounding_boxes
+            padded_boxes[:num_boxes] = bounding_boxes_tensor
 
         padded_templates[:num_templates, :, :, :] = templates_imgs
 
@@ -209,9 +216,11 @@ class PersonDataset(Dataset):
         # Return a dictionary with the data
         return {
             'img': image,
-            'target_bounding_box': target_bounding_box,
+            'target_bounding_box': target_bounding_box_tensor,
             'bounding_boxes': padded_boxes,
             'templates': padded_templates,
             'num_boxes': num_boxes,
-            'num_templates': num_templates
+            'num_templates': num_templates,
+            'orig_dim': (orig_h, orig_w),
+            'img_path': sample['img_path']
         }

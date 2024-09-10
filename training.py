@@ -9,20 +9,57 @@ from rtdetrv2_decoder import RTDETRTransformerv2
 from rtdetr_postprocessor import RTDETRPostProcessor
 from matcher import HungarianMatcher
 import cv2
+import numpy as np
 import matplotlib.pyplot as plt
 import time
+import os
+from torch_ema import ExponentialMovingAverage
+num_classes = 1
 
+# Define your drawing function to draw bounding boxes and scores
+def draw_predictions(image, boxes, scores, score_threshold=0.5):
+    h, w = image.shape[:2]
+    
+    for i, score in enumerate(scores):
+        if score > score_threshold:
+            # Convert bbox format from (x, y, w, h) in unit scale to (x1, y1, x2, y2) in pixel scale
+            x, y, bw, bh = boxes[i]
+            x1 = int((x - bw / 2) * w)
+            y1 = int((y - bh / 2) * h)
+            x2 = int((x + bw / 2) * w)
+            y2 = int((y + bh / 2) * h)
+            
+            # Draw bounding box
+            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Draw the objectness score
+            label = f"Objectness: {score[0]:.2f}"
+            cv2.putText(image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    return image
+
+# --- Warmup Scheduler Setup ---
+def lr_lambda(current_step):
+    warmup_steps = 2000  # Number of steps for the warmup phase
+    start_factor = 0.001  # Start at 0.1% of the base learning rate
+    
+    # If the current step is in the warm-up phase, increase the LR linearly
+    if current_step < warmup_steps:
+        return start_factor + (1 - start_factor) * (current_step / warmup_steps)
+    
+    # After warm-up, keep the learning rate constant (or you could implement decay)
+    return 1.0
 
 def main():
 
     # Setup Feature Extractor
-    presnet = PResNet(depth= 34,
+    presnet = PResNet(depth= 18,
                     variant = 'd',
                     freeze_at = -1,
                     return_idx = [1, 2, 3],
                     num_stages = 4,
                     freeze_norm = False,
                     pretrained = True )
+        
 
     encoder = HybridEncoder(  in_channels = [128, 256, 512],
                             feat_strides = [8, 16, 32],
@@ -43,16 +80,17 @@ def main():
                                 feat_strides = [8, 16, 32],
                                 hidden_dim = 256,
                                 num_levels = 3,
-                                num_layers = 4,
+                                num_layers = 3,
                                 num_queries = 300,
-                                num_denoising = 100,
+                                num_denoising = 200,
                                 label_noise_ratio = 0.5,
                                 box_noise_scale = 1.0, # 1.0 0.4
-                                eval_idx = 2,
+                                eval_idx = -1,
                                 # NEW
                                 num_points = [4, 4, 4], # [3,3,3] [2,2,2]
                                 cross_attn_method = 'default', # default, discrete
-                                query_select_method = 'default' # default, agnostic 
+                                query_select_method = 'agnostic', # default, agnostic 
+                                num_classes=1
                                 )
     
     class Model(nn.Module):
@@ -76,8 +114,10 @@ def main():
     from dataset import PersonDataset
     from torch.utils.data import random_split, DataLoader
 
-    root_dir = '/homes/jalemangallegos/datasets/person'
+    root_dir = '/media/enrique/Extreme SSD/person'
     sequence_list = [f'person-{i}' for i in range(1, 21)]
+    sequence_list = ["person-9"] # Overfit on just one subdataset
+
     dataset = PersonDataset(root_dir=root_dir, sequence_list=sequence_list, img_transform_size=(640, 640), template_transform_size=(256, 256), max_num_templates=10, max_detections = 300)
 
     # Define the lengths for training and validation sets
@@ -87,34 +127,42 @@ def main():
     # Split the dataset
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-    batch_size = 6
+    batch_size = 4
     # Optionally, create DataLoader objects for the training and validation sets
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     import torch.optim as optim
     from rtdetrv2_criterion import RTDETRCriterionv2
     from torch.cuda.amp import GradScaler, autocast
+    from torch.optim.lr_scheduler import LambdaLR
 
     # Defining the Optimizer
     learning_rate = 0.0001
-    optimizer = optim.AdamW(detr.parameters(), lr=learning_rate)
+    optimizer = optim.AdamW(detr.parameters(), lr=learning_rate, weight_decay=0.0001)
 
     # Defining the criterion
     losses = ['vfl', 'boxes']
     weight_dict={'cost_class': 2, 'cost_bbox':5, 'cost_giou':2}
-    matcher = HungarianMatcher(use_focal_loss=False, weight_dict = weight_dict)
+    matcher = HungarianMatcher(use_focal_loss=False, weight_dict = weight_dict, alpha = 0.75)
     weight_dict = {'loss_vfl': 1, 'loss_bbox': 5, 'loss_giou': 2}
-    criterion = RTDETRCriterionv2(losses=losses, weight_dict=weight_dict, matcher=matcher)
+    criterion = RTDETRCriterionv2(losses=losses, weight_dict=weight_dict, matcher=matcher, num_classes=num_classes)
     criterion.train()
+    ema = ExponentialMovingAverage(detr.parameters(), decay=0.9999)
 
     # Number of epochs
-    num_epochs = 20
+    num_epochs = 100
 
     # Initialize the GradScaler
     scaler = GradScaler()
+    scaler = None
 
+    max_norm = 0.1
+
+    # Create the LambdaLR scheduler
+    lr_warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+    exp_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     import wandb
     # Weights and biases config
@@ -131,22 +179,26 @@ def main():
         }
     )
 
-
     # Define the paths for saving models
-    checkpoint_path = "detr_checkpoint.pth"
-    best_model_path = "detr_best_model.pth"
+    checkpoint_path = "detr_checkpoint_desk.pth"
+    output_image_path = "output_images"
+    N = 100  # Save images every N iterations
 
     best_val_loss = float('inf')
+    device_str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Ensure the output directory exists
+    os.makedirs(output_image_path, exist_ok=True)
 
     for epoch in range(num_epochs):
         # Training Phase
         detr.train()  # Set model to training mode
         running_loss = 0.0
-        total_batches = len(train_loader)
-        total_samples = len(train_loader.dataset)
+        total_batches = len(dataloader)
+        total_samples = len(dataloader.dataset)
         samples_processed = 0
 
-        for batch_idx, batch in enumerate(train_loader):
+        for batch_idx, batch in enumerate(dataloader):
             images = batch['img']  # Input images
             bounding_boxes_batch = batch['bounding_boxes']  # Target bounding boxes for the whole batch
             num_boxes_batch = batch['num_boxes']  # Number of valid bounding boxes for the whole batch
@@ -157,37 +209,96 @@ def main():
             # Create a list of dictionaries for targets
             targets = []
             for i in range(len(images)):
-                labels = torch.full((300,), 5, dtype=torch.long)  # Initialize all as 5 ("nothing" class)
-                if num_boxes_batch[i].item() > 0:
-                    labels[:num_boxes_batch[i]] = 1  # Mark the first num_boxes elements as 1 ("person" class)
-                targets.append({'labels': labels, 'boxes': bounding_boxes_batch[i]})
+                labels = torch.full((num_boxes_batch[i],), 0, dtype=torch.long) 
+                targets.append({'labels': labels, 'boxes': bounding_boxes_batch[i][:num_boxes_batch[i],:]})
 
             # Move data to GPU if available
             if torch.cuda.is_available():
                 images = images.cuda()
                 targets = [{'labels': target['labels'].cuda(), 'boxes': target['boxes'].cuda()} for target in targets]
 
-            # Zero the parameter gradients
-            optimizer.zero_grad()
+            if scaler is not None:
+                with torch.autocast(device_type=str(device_str), cache_enabled=True):
+                    outputs = detr(images, targets=targets)
+                
+                with torch.autocast(device_type=str(device_str), enabled=False):
+                    loss_dict = criterion(outputs, targets)
 
-            with autocast():  # Use automatic mixed precision
-                # Forward pass
+                loss: torch.Tensor = sum(loss_dict.values()); loss_dict["total_loss"] = loss
+                scaler.scale(loss).backward()
+
+                if max_norm > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(detr.parameters(), max_norm)
+
+                # Unscale the gradients and step the optimizer
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+
+            else:
                 outputs = detr(images, targets=targets)
 
-                # Calculate the loss
                 loss_dict = criterion(outputs, targets)
-                loss: torch.Tensor = sum(loss_dict.values())
-                loss_dict["total_loss"] = loss
+
+                loss: torch.Tensor = sum(loss_dict.values()); loss_dict["total_loss"] = loss
+                optimizer.zero_grad()
+                loss.backward()
+
+                if max_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(detr.parameters(), max_norm)
+
+                optimizer.step()
+
+            # Save output images every N iterations
+            if batch_idx % N == 0:
+                print("TIME TO DRAW SOME IMAGES")
+                print("TIME TO DRAW SOME IMAGES")
+                print("TIME TO DRAW SOME IMAGES")
+
+                pred_logits = outputs["pred_logits"]  # [batch, max_detections, num_classes]
+                pred_boxes = outputs["pred_boxes"]  # [batch, max_detections, 4]
+
+                
+                # Iterate over the batch
+                for i in range(pred_logits.size(0)):  # Iterate through batch
+                    image_np = images[i].permute(1, 2, 0).cpu().numpy()  # Convert image to numpy
+                    image_np = (image_np * 255).astype(np.uint8)  # Scale to [0, 255]
+                    
+                    print("pred_logits[i]", pred_logits[i].shape)
+
+                    # Apply sigmoid to get objectness score
+                    scores = torch.sigmoid(pred_logits[i])
+
+                    topk_logits = torch.topk(scores.squeeze(), 5)
+                    print("Top Scores:", topk_logits)  
+
+                    scores = scores.cpu().detach().numpy()  # Objectness scores in [0, 1]
+                    boxes = pred_boxes[i].cpu().detach().numpy()  # Bounding boxes in unit scale
+
+
+                    if torch.any(topk_logits.values > 0.5):
+                        # Draw predictions on the image
+                        image_with_boxes = draw_predictions(image_np.copy(), boxes, scores)
+
+                        # Save the image with bounding boxes
+                        output_file = f"{output_image_path}/epoch_{epoch}_batch_{batch_idx}_img_{i}.jpg"
+                        cv2.imwrite(output_file, image_with_boxes)
+                        print(f"Saved image: {output_file}")
+                    else:
+                        print("NO PREDICTION IS GOOD ENOUGH!!!!!")
+                    
+            if lr_warmup_scheduler is not None:
+                lr_warmup_scheduler.step()
+
+            if exp_scheduler is not None:
+                exp_scheduler.step()
+
+            if ema is not None:
+                ema.update()
 
             # Log the training loss
             wandb.log({f"train_{key}": value for key, value in loss_dict.items()})
-
-            # Scale the loss before backpropagation
-            scaler.scale(loss).backward()
-
-            # Unscale the gradients and step the optimizer
-            scaler.step(optimizer)
-            scaler.update()
 
             # Accumulate loss
             running_loss += loss.item()
@@ -198,71 +309,33 @@ def main():
             # Print training progress
             print(f"Epoch [{epoch+1}/{num_epochs}] - Iteration [{batch_idx+1}/{total_batches}] "
                 f"Loss: {loss.item():.4f} - Progress: {percent_complete:.2f}%")
-
+            
         avg_train_loss = running_loss / total_batches
         print(f"Epoch [{epoch+1}/{num_epochs}] completed. Average Training Loss: {avg_train_loss:.4f}")
 
-        # Validation Phase
-        detr.eval()  # Set model to evaluation mode
-        val_running_loss = 0.0
-        samples_processed = 0
-        with torch.no_grad():  # Disable gradient computation for validation
-            for batch_idx, batch in enumerate(val_loader):
-                images = batch['img']
-                bounding_boxes_batch = batch['bounding_boxes']
-                num_boxes_batch = batch['num_boxes']
-
-                batch_size = images.size(0)
-                samples_processed += batch_size
-
-                targets = []
-                for i in range(len(images)):
-                    labels = torch.full((300,), 5, dtype=torch.long)
-                    if num_boxes_batch[i].item() > 0:
-                        labels[:num_boxes_batch[i]] = 1
-                    targets.append({'labels': labels, 'boxes': bounding_boxes_batch[i]})
-
-                if torch.cuda.is_available():
-                    images = images.cuda()
-                    targets = [{'labels': target['labels'].cuda(), 'boxes': target['boxes'].cuda()} for target in targets]
-
-                # Forward pass
-                with autocast():
-                    outputs = detr(images, targets=targets)
-                    loss_dict = criterion(outputs, targets)
-                    loss: torch.Tensor = sum(loss_dict.values())
-                    loss_dict["total_loss"] = loss
-
-                # Log the validation loss
-                wandb.log({f"valid_{key}": value for key, value in loss_dict.items()})
-
-                val_running_loss += loss.item()
-
-        avg_val_loss = val_running_loss / len(val_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}] completed. Average Validation Loss: {avg_val_loss:.4f}")
-
         # Logging to wandb
-        wandb.log({"epoch": epoch + 1, "train_loss": avg_train_loss, "val_loss": avg_val_loss})
+        wandb.log({"epoch": epoch + 1, "train_loss": avg_train_loss})
 
         # Save the current checkpoint
-        torch.save({
-            'epoch': epoch + 1,
-            'model_state_dict': detr.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scaler_state_dict': scaler.state_dict(),
-            'train_loss': avg_train_loss,
-            'val_loss': avg_val_loss,
-        }, checkpoint_path)
+        if scaler is not None:
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': detr.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'train_loss': avg_train_loss,
+            }, checkpoint_path)
+        else:
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': detr.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_train_loss,
+            }, checkpoint_path)
 
-        # Save the best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save(detr.state_dict(), best_model_path)
-            print(f"Best model saved with validation loss: {best_val_loss:.4f}")
 
     print('Finished Training')
     wandb.finish()
-
 
 if __name__ == "__main__":
     main()

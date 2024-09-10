@@ -17,6 +17,7 @@ from utils import deformable_attention_core_func_v2, get_activation, inverse_sig
 from utils import bias_init_with_prob
 
 
+
 class MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers, act='relu'):
         super().__init__()
@@ -278,6 +279,7 @@ class TransformerDecoder(nn.Module):
             ref_points_detach = inter_ref_bbox.detach()
 
         return torch.stack(dec_out_bboxes), torch.stack(dec_out_logits)
+
 
 class RTDETRTransformerv2(nn.Module):
     __share__ = ['num_classes', 'eval_spatial_size']

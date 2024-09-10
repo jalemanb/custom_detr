@@ -9,7 +9,6 @@ from collections import OrderedDict
 from common import get_activation, FrozenBatchNorm2d
 
 
-
 ResNet_cfg = {
     18: [2, 2, 2, 2],
     34: [3, 4, 6, 3],
@@ -235,6 +234,4 @@ class PResNet(nn.Module):
             x = stage(x)
             if idx in self.return_idx:
                 outs.append(x)
-        for i, out in enumerate(outs):
-            print(f"out: {i}", out.shape)
         return outs

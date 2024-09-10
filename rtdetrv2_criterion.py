@@ -12,7 +12,6 @@ import copy
 from box_ops import box_cxcywh_to_xyxy, box_iou, generalized_box_iou
 from dist_utils import get_world_size, is_dist_available_and_initialized
 
-
 class RTDETRCriterionv2(nn.Module):
     """ This class computes the loss for DETR.
     The process happens in two steps:
@@ -57,7 +56,6 @@ class RTDETRCriterionv2(nn.Module):
                                     dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
         target = F.one_hot(target_classes, num_classes=self.num_classes+1)[..., :-1]
-
         loss = torchvision.ops.sigmoid_focal_loss(src_logits, target, self.alpha, self.gamma, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
 
@@ -81,13 +79,17 @@ class RTDETRCriterionv2(nn.Module):
         target_classes[idx] = target_classes_o
         target = F.one_hot(target_classes, num_classes=self.num_classes + 1)[..., :-1]
 
+        # print("target_classes_o", target_classes_o)
+        # print("target.shape", target.shape)
+        # print("target", target)
+
         target_score_o = torch.zeros_like(target_classes, dtype=src_logits.dtype)
         target_score_o[idx] = ious.to(target_score_o.dtype)
         target_score = target_score_o.unsqueeze(-1) * target
 
         pred_score = F.sigmoid(src_logits).detach()
         weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
-
+        
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         return {'loss_vfl': loss}
@@ -134,7 +136,8 @@ class RTDETRCriterionv2(nn.Module):
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
     def forward(self, outputs, targets, **kwargs):
-        """ This performs the loss compukeys
+        """ This performs the loss computation.
+        Parameters:
              outputs: dict of tensors, see the output specification of the model for the format
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
@@ -155,11 +158,10 @@ class RTDETRCriterionv2(nn.Module):
         # Compute all the requested losses
         losses = {}
         for loss in self.losses:
-            meta = self.get_loss_meta_info(loss, outputs, targets, indices)           
+            meta = self.get_loss_meta_info(loss, outputs, targets, indices)            
             l_dict = self.get_loss(loss, outputs, targets, indices, num_boxes, **meta)
             l_dict = {k: l_dict[k] * self.weight_dict[k] for k in l_dict if k in self.weight_dict}
             losses.update(l_dict)
-
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
@@ -187,7 +189,6 @@ class RTDETRCriterionv2(nn.Module):
                     l_dict = {k + f'_dn_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
-
         # In case of encoder auxiliary losses. For rtdetr v2
         if 'enc_aux_outputs' in outputs:
             assert 'enc_meta' in outputs, ''
@@ -213,7 +214,6 @@ class RTDETRCriterionv2(nn.Module):
             
             if class_agnostic:
                 self.num_classes = orig_num_classes
-        
 
         return losses
 

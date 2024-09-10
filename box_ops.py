@@ -50,6 +50,10 @@ def generalized_box_iou(boxes1, boxes2):
     """
     # degenerate boxes gives inf / nan results
     # so do an early check
+    # print("boxes1[:, 2:]", boxes1[:, 2:])
+    # print("boxes1[:, 2:].shpae", boxes1[:, 2:].shape)
+    # print("boxes2[:, 2:]", boxes2[:, 2:])
+    # print("boxes2[:, 2:].shpae", boxes2[:, 2:].shape)
     assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
     assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
     iou, union = box_iou(boxes1, boxes2)

@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from utils import get_activation
 
+
 class ConvNormLayer(nn.Module):
     def __init__(self, ch_in, ch_out, kernel_size, stride, padding=None, bias=False, act=None):
         super().__init__()
@@ -25,6 +26,7 @@ class ConvNormLayer(nn.Module):
 
     def forward(self, x):
         return self.act(self.norm(self.conv(x)))
+
 
 class RepVggBlock(nn.Module):
     def __init__(self, ch_in, ch_out, act='relu'):
@@ -282,10 +284,7 @@ class HybridEncoder(nn.Module):
     def forward(self, feats):
         assert len(feats) == len(self.in_channels)
         proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
-
-        for i, feats in enumerate(proj_feats):
-            print(f"out: {i}", feats.shape)
-
+        
         # encoder
         if self.num_encoder_layers > 0:
             for i, enc_ind in enumerate(self.use_encoder_idx):
